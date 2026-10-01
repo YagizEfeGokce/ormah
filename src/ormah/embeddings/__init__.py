@@ -17,7 +17,10 @@ def get_adapter(settings) -> EmbeddingAdapter:
     if provider == "local":
         from ormah.embeddings.local_adapter import LocalAdapter
 
-        return LocalAdapter(model_name=settings.embedding_model)
+        return LocalAdapter(
+            model_name=settings.embedding_model,
+            max_query_chars=settings.embedding_max_content_chars,
+        )
 
     if provider == "ollama":
         from ormah.embeddings.ollama_adapter import OllamaEmbeddingAdapter

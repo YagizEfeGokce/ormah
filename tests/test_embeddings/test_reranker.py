@@ -361,6 +361,48 @@ class TestDocConstruction:
         assert mock.rerank.call_args[0][1][0] == "Same text"
 
 
+class TestQueryConstruction:
+    """The query side of each (query, doc) pair must be capped too.
+
+    Regression: an uncapped query (agent prompts are routinely multi-KB,
+    and the whisper context buffer concatenates several) inflated the
+    cross-encoder batch until the ORT arena grew by ~GBs per concurrent
+    whisper call and was never returned to the OS.
+    """
+
+    def test_query_truncation_default(self):
+        """Query is truncated to max_doc_chars (default 512)."""
+        long_query = "q" * 5000
+        candidate = _candidate("a", "Title", 0.5, content="content")
+        mock = MagicMock()
+        mock.rerank.return_value = [0.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock):
+            rerank(long_query, [candidate], "model", min_score=0.0)
+
+        assert len(mock.rerank.call_args[0][0]) == 512
+
+    def test_query_truncation_custom(self):
+        long_query = "q" * 5000
+        candidate = _candidate("a", "Title", 0.5, content="content")
+        mock = MagicMock()
+        mock.rerank.return_value = [0.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock):
+            rerank(long_query, [candidate], "model", min_score=0.0, max_doc_chars=100)
+
+        assert len(mock.rerank.call_args[0][0]) == 100
+
+    def test_short_query_untouched(self):
+        candidate = _candidate("a", "Title", 0.5, content="content")
+        mock = MagicMock()
+        mock.rerank.return_value = [0.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock):
+            rerank("test query", [candidate], "model", min_score=0.0)
+
+        assert mock.rerank.call_args[0][0] == "test query"
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------

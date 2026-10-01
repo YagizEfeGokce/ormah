@@ -8,13 +8,16 @@ down proportionally).
 
 from __future__ import annotations
 
-import logging
+import threading
 
 from ormah.embeddings.cache import get_fastembed_cache_dir, is_model_cached
 
-logger = logging.getLogger(__name__)
 
 _model_cache: dict[str, object] = {}
+_rerank_lock = threading.Lock()
+# ponytail: one global lock — concurrent cross-encoder inference multiplied
+# the ORT CPU arena high-water mark (~GBs, never returned to the OS).
+# Per-model locks if rerank throughput ever matters.
 
 # CE score range for linear rescale normalization.
 # Derived from empirical distribution: MS MARCO MiniLM scores range
@@ -49,7 +52,7 @@ def rerank(
         model_name: CrossEncoder model name.
         min_score: Drop results below this blended score.
         blend_alpha: Weight for cross-encoder component (0–1). Default 0.6.
-        max_doc_chars: Max characters of content to feed to cross-encoder.
+        max_doc_chars: Max characters of content or query fed to the cross-encoder.
 
     Returns:
         Filtered and reordered candidates with updated scores.
@@ -69,8 +72,13 @@ def rerank(
             doc = f"{doc}: {content[:max_doc_chars]}" if doc else content[:max_doc_chars]
         docs.append(doc)
 
-    # Score all docs in one batch
-    ce_scores = list(model.rerank(query, docs))
+    # Score all docs in one batch. The query is capped to max_doc_chars too:
+    # the cross-encoder shares one token window across the pair, and an
+    # uncapped query (multi-KB agent prompts, and the whisper context buffer
+    # concatenates several) inflated the batch until the ORT arena grew by
+    # GBs per concurrent call and was never returned to the OS.
+    with _rerank_lock:
+        ce_scores = list(model.rerank(query[:max_doc_chars], docs))
 
     # Linear-rescale blend with original embedding scores, filter, sort
     reranked = []
@@ -94,15 +102,20 @@ def rerank(
     reranked.sort(key=lambda r: r["score"], reverse=True)
     return reranked
 
-
 def _get_model(model_name: str):
     if model_name in _model_cache:
         return _model_cache[model_name]
     from fastembed.rerank.cross_encoder import TextCrossEncoder
+    import onnxruntime as ort
 
+    # The default CPU memory arena grows to the worst-case batch and is never
+    # returned to the OS — GBs of resident RSS on multi-KB whisper queries.
+    opts = ort.SessionOptions()
+    opts.enable_cpu_mem_arena = False
     model = TextCrossEncoder(
         model_name,
         cache_dir=str(get_fastembed_cache_dir()),
+        session_options=opts,
     )
     _model_cache[model_name] = model
     return model
